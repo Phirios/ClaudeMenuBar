@@ -1,8 +1,17 @@
 # ClaudeMenuBar
 
-A native macOS menu bar app that displays your Claude Code rate limit usage in real time.
+<p align="center">
+  <img src="assets/icon.png" width="128" alt="ClaudeMenuBar Icon">
+</p>
 
-![macOS](https://img.shields.io/badge/macOS-14%2B-blue) ![Swift](https://img.shields.io/badge/Swift-5.9-orange)
+<p align="center">
+  A native macOS menu bar app that displays your Claude Code rate limit usage in real time.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-14%2B-blue" alt="macOS">
+  <img src="https://img.shields.io/badge/Swift-5.9-orange" alt="Swift">
+</p>
 
 ## Features
 
