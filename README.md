@@ -41,32 +41,39 @@ Each check costs ~10 tokens (Haiku).
 
 ## Install
 
-### Build from source
+### Download (recommended)
 
-```bash
-git clone https://github.com/phirios/ClaudeMenuBar.git
-cd ClaudeMenuBar
-swift build -c release
-```
-
-### Set up
-
-1. **Cache your token** (one-time, avoids keychain prompts):
+1. Download the latest `ClaudeMenuBar-v*.zip` from [Releases](https://github.com/Phirios/ClaudeMenuBar/releases)
+2. Unzip and move `ClaudeMenuBar.app` to `/Applications`
+3. Cache your Claude Code token (one-time):
 ```bash
 security find-generic-password -s "Claude Code-credentials" -w | \
   python3 -c "import sys,json; print(json.loads(sys.stdin.read())['claudeAiOauth']['accessToken'])" \
   > ~/.claude/claude-menubar-token
 ```
+4. Launch the app
 
-2. **Install as app** (optional):
+> **Note:** macOS may show "unidentified developer" warning on first launch. Right-click the app and select Open, then click Open in the dialog.
+
+### Build from source
+
 ```bash
-mkdir -p ~/Applications/ClaudeMenuBar.app/Contents/MacOS
-cp .build/release/ClaudeMenuBar ~/Applications/ClaudeMenuBar.app/Contents/MacOS/
+git clone https://github.com/Phirios/ClaudeMenuBar.git
+cd ClaudeMenuBar
+swift build -c release
 ```
 
-3. **Launch at login** (optional):
+Then create the app bundle:
 ```bash
-osascript -e 'tell application "System Events" to make login item at end with properties {path:"'$HOME'/Applications/ClaudeMenuBar.app", hidden:false}'
+APP="$HOME/Applications/ClaudeMenuBar.app/Contents"
+mkdir -p "$APP/MacOS"
+cp .build/release/ClaudeMenuBar "$APP/MacOS/"
+```
+
+### Launch at login (optional)
+
+```bash
+osascript -e 'tell application "System Events" to make login item at end with properties {path:"/Applications/ClaudeMenuBar.app", hidden:false}'
 ```
 
 ## Menu Bar
