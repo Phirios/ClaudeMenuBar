@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  <img src="assets/topbar-example.png" alt="Menu Bar Example">
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/macOS-14%2B-blue" alt="macOS">
   <img src="https://img.shields.io/badge/Swift-5.9-orange" alt="Swift">
 </p>
