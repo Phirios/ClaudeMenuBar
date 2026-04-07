@@ -85,38 +85,94 @@ class UsageMonitor: ObservableObject {
                     return
                 }
 
-                let headers = httpResponse.allHeaderFields
+                // If 401, token is expired — clear cache and retry once with fresh keychain token
+                if httpResponse.statusCode == 401 {
+                    self?.clearCachedToken()
+                    if let freshToken = self?.getToken(), freshToken != token {
+                        self?.isLoading = true
+                        self?.retryFetchUsage(token: freshToken)
+                        return
+                    } else {
+                        self?.error = "Auth token expired. Re-login to Claude Code."
+                        self?.onUpdate?()
+                        return
+                    }
+                }
 
-                guard let fiveHUtil = self?.headerDouble(headers, "anthropic-ratelimit-unified-5h-utilization"),
-                      let sevenDUtil = self?.headerDouble(headers, "anthropic-ratelimit-unified-7d-utilization") else {
-                    self?.error = "Rate limit headers not found (HTTP \(httpResponse.statusCode))"
+                self?.handleResponse(httpResponse)
+            }
+        }.resume()
+    }
+
+    private func clearCachedToken() {
+        let cacheURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/claude-menubar-token")
+        try? FileManager.default.removeItem(at: cacheURL)
+    }
+
+    private func retryFetchUsage(token: String) {
+        var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue(token, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+
+        let body: [String: Any] = [
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 1,
+            "messages": [["role": "user", "content": "."]]
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, err in
+            DispatchQueue.main.async {
+                self?.isLoading = false
+                if let err = err {
+                    self?.error = err.localizedDescription
                     self?.onUpdate?()
                     return
                 }
-
-                let fiveHReset = self?.headerTimestamp(headers, "anthropic-ratelimit-unified-5h-reset") ?? Date()
-                let sevenDReset = self?.headerTimestamp(headers, "anthropic-ratelimit-unified-7d-reset") ?? Date()
-                let overageUtil = self?.headerDouble(headers, "anthropic-ratelimit-unified-overage-utilization") ?? 0
-                let overageReset = self?.headerTimestamp(headers, "anthropic-ratelimit-unified-overage-reset") ?? Date()
-                let status = self?.headerString(headers, "anthropic-ratelimit-unified-status") ?? "unknown"
-                let claim = self?.headerString(headers, "anthropic-ratelimit-unified-representative-claim") ?? ""
-                let fallback = self?.headerDouble(headers, "anthropic-ratelimit-unified-fallback-percentage") ?? 0
-
-                self?.currentUsage = UsageData(
-                    fiveHourUtilization: fiveHUtil,
-                    fiveHourReset: fiveHReset,
-                    sevenDayUtilization: sevenDUtil,
-                    sevenDayReset: sevenDReset,
-                    overageUtilization: overageUtil,
-                    overageReset: overageReset,
-                    representativeClaim: claim,
-                    fallbackPercentage: fallback,
-                    status: status,
-                    fetchedAt: Date()
-                )
-                self?.onUpdate?()
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    self?.error = "Invalid response"
+                    self?.onUpdate?()
+                    return
+                }
+                self?.handleResponse(httpResponse)
             }
         }.resume()
+    }
+
+    private func handleResponse(_ httpResponse: HTTPURLResponse) {
+        let headers = httpResponse.allHeaderFields
+
+        guard let fiveHUtil = headerDouble(headers, "anthropic-ratelimit-unified-5h-utilization"),
+              let sevenDUtil = headerDouble(headers, "anthropic-ratelimit-unified-7d-utilization") else {
+            error = "Rate limit headers not found (HTTP \(httpResponse.statusCode))"
+            onUpdate?()
+            return
+        }
+
+        let fiveHReset = headerTimestamp(headers, "anthropic-ratelimit-unified-5h-reset") ?? Date()
+        let sevenDReset = headerTimestamp(headers, "anthropic-ratelimit-unified-7d-reset") ?? Date()
+        let overageUtil = headerDouble(headers, "anthropic-ratelimit-unified-overage-utilization") ?? 0
+        let overageReset = headerTimestamp(headers, "anthropic-ratelimit-unified-overage-reset") ?? Date()
+        let status = headerString(headers, "anthropic-ratelimit-unified-status") ?? "unknown"
+        let claim = headerString(headers, "anthropic-ratelimit-unified-representative-claim") ?? ""
+        let fallback = headerDouble(headers, "anthropic-ratelimit-unified-fallback-percentage") ?? 0
+
+        currentUsage = UsageData(
+            fiveHourUtilization: fiveHUtil,
+            fiveHourReset: fiveHReset,
+            sevenDayUtilization: sevenDUtil,
+            sevenDayReset: sevenDReset,
+            overageUtilization: overageUtil,
+            overageReset: overageReset,
+            representativeClaim: claim,
+            fallbackPercentage: fallback,
+            status: status,
+            fetchedAt: Date()
+        )
+        onUpdate?()
     }
 
     private func getToken() -> String? {
