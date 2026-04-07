@@ -259,7 +259,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
                 if fillWidth > 0 {
                     let fillRect = NSRect(x: barX, y: barY, width: fillWidth, height: timeBarHeight)
-                    self.percentColor(Int(timePct * 100)).setFill()
+                    NSColor.systemGreen.setFill()
                     NSBezierPath(roundedRect: fillRect, xRadius: 1.5, yRadius: 1.5).fill()
                 }
             }
@@ -321,13 +321,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 ))
                 ctx.clip()
 
-                // Fill from top in flipped coords (top = y:0)
+                // Fill from bottom up in flipped coords (top = y:0)
                 let fillHeight = innerRadius * 2 * CGFloat(min(weeklyPercent, 100)) / 100.0
                 let weeklyColor = blocked ? NSColor.systemRed : self.percentColor(weeklyPercent)
                 ctx.setFillColor(weeklyColor.cgColor)
                 ctx.fill(CGRect(
                     x: center.x - innerRadius,
-                    y: center.y - innerRadius,
+                    y: center.y + innerRadius - fillHeight,
                     width: innerRadius * 2,
                     height: fillHeight
                 ))
@@ -356,7 +356,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Helpers
 
     private func barString(percent: Int) -> String {
-        let filled = percent / 5
+        let clamped = min(max(percent, 0), 100)
+        let filled = clamped / 5
         let empty = 20 - filled
         return "[" + String(repeating: "█", count: filled) + String(repeating: "░", count: empty) + "]"
     }
