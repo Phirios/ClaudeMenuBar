@@ -5,7 +5,8 @@
 </p>
 
 <p align="center">
-  A native macOS menu bar app that displays your Claude Code rate limit usage in real time.
+  A native system tray app that displays your Claude Code rate limit usage in real time.
+  <br>Available for <strong>macOS</strong> (Swift/AppKit) and <strong>Linux</strong> (Rust/KDE Plasma).
 </p>
 
 <p align="center">
@@ -105,6 +106,51 @@ Click to open:
 
 - macOS 14+
 - Claude Code CLI (authenticated via `claude auth login`)
+
+---
+
+## Linux (KDE Plasma)
+
+Pure Rust implementation using [ksni](https://github.com/iovxw/ksni) (StatusNotifierItem) and [tiny-skia](https://github.com/RazrFalcon/tiny-skia). No GTK or libappindicator dependency — works on both X11 and Wayland.
+
+### Install dependencies (Arch / CachyOS)
+
+```bash
+sudo pacman -S rust dbus
+```
+
+### Build
+
+```bash
+cd linux
+cargo build --release
+```
+
+Binary: `linux/target/release/claude-menubar`
+
+### Token setup (one-time)
+
+```bash
+security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | \
+  python3 -c "import sys,json; print(json.loads(sys.stdin.read())['claudeAiOauth']['accessToken'])" \
+  > ~/.claude/claude-menubar-token
+```
+
+Or copy from your Mac's `~/.claude/claude-menubar-token`.
+
+### Autostart with KDE
+
+```bash
+mkdir -p ~/.config/autostart
+cat > ~/.config/autostart/claude-menubar.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=ClaudeMenuBar
+Exec=/path/to/claude-menubar
+Comment=Claude Code rate limit monitor
+X-KDE-autostart-phase=2
+EOF
+```
 
 ## License
 
