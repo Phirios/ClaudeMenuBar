@@ -58,7 +58,7 @@ class UsageMonitor: ObservableObject {
         // Minimal request to get rate limit headers
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         request.httpMethod = "POST"
-        request.setValue(token, forHTTPHeaderField: "x-api-key")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
 
@@ -85,18 +85,18 @@ class UsageMonitor: ObservableObject {
                     return
                 }
 
-                // If 401, token is expired — clear cache and retry once with fresh keychain token
+                // If 401, try keychain for a fresher token before giving up
                 if httpResponse.statusCode == 401 {
-                    self?.clearCachedToken()
-                    if let freshToken = self?.getToken(), freshToken != token {
+                    if let freshToken = self?.getKeychainToken(), freshToken != token {
+                        self?.cacheToken(freshToken)
                         self?.isLoading = true
                         self?.retryFetchUsage(token: freshToken)
                         return
-                    } else {
-                        self?.error = "Auth token expired. Re-login to Claude Code."
-                        self?.onUpdate?()
-                        return
                     }
+                    self?.clearCachedToken()
+                    self?.error = "Auth token expired. Re-login to Claude Code."
+                    self?.onUpdate?()
+                    return
                 }
 
                 self?.handleResponse(httpResponse)
@@ -104,16 +104,39 @@ class UsageMonitor: ObservableObject {
         }.resume()
     }
 
-    private func clearCachedToken() {
-        let cacheURL = FileManager.default.homeDirectoryForCurrentUser
+    private var cacheURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/claude-menubar-token")
+    }
+
+    private func clearCachedToken() {
         try? FileManager.default.removeItem(at: cacheURL)
+    }
+
+    func cacheToken(_ token: String) {
+        try? token.write(to: cacheURL, atomically: true, encoding: .utf8)
+    }
+
+    func getKeychainToken() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "Claude Code-credentials",
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = json["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String else { return nil }
+        return token
     }
 
     private func retryFetchUsage(token: String) {
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         request.httpMethod = "POST"
-        request.setValue(token, forHTTPHeaderField: "x-api-key")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
 
@@ -176,36 +199,12 @@ class UsageMonitor: ObservableObject {
     }
 
     private func getToken() -> String? {
-        // Read token from a cache file to avoid keychain permission prompts.
-        // The file is populated by a helper script or on first run from keychain.
-        let cacheURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/claude-menubar-token")
-
         if let cached = try? String(contentsOf: cacheURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
            !cached.isEmpty {
             return cached
         }
-
-        // Fallback: try to read from keychain and cache it
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        guard status == errSecSuccess, let data = result as? Data,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = json["claudeAiOauth"] as? [String: Any],
-              let token = oauth["accessToken"] as? String else {
-            return nil
-        }
-
-        // Cache it so next time no keychain prompt
-        try? token.write(to: cacheURL, atomically: true, encoding: .utf8)
+        guard let token = getKeychainToken() else { return nil }
+        cacheToken(token)
         return token
     }
 
