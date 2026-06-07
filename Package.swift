@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "ClaudeMenuBar",
+    name: "AILimitCounter",
     platforms: [.macOS(.v14)],
     targets: [
         .executableTarget(
-            name: "ClaudeMenuBar",
-            path: "ClaudeMenuBar"
+            name: "AILimitCounter",
+            path: "AILimitCounter"
         )
     ]
 )

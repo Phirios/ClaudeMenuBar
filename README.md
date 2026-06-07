@@ -1,11 +1,11 @@
-# ClaudeMenuBar
+# AILimitCounter
 
 <p align="center">
-  <img src="assets/icon.png" width="128" alt="ClaudeMenuBar Icon">
+  <img src="assets/icon.png" width="128" alt="AILimitCounter Icon">
 </p>
 
 <p align="center">
-  A native system tray app that displays your Claude Code rate limit usage in real time.
+  A native system tray app that displays your AI CLI rate limit usage in real time.
   <br>Available for <strong>macOS</strong> (Swift/AppKit) and <strong>Linux</strong> (Rust/KDE Plasma).
 </p>
 
@@ -20,14 +20,17 @@
 
 ## Features
 
+- **Multiple AI CLIs** — Switch between Claude Code and Codex from the menu or settings
 - **Dual limit visualization** — Custom icon with an outer ring (5h session limit, App Store-style circular progress) and an inner circle (7d weekly limit, fills vertically)
 - **Color-coded** — Green (<55%), Yellow (55-69%), Orange (70-84%), Red (85%+)
 - **Session percentage** — Shown as text next to the icon with a time-remaining progress bar underneath
-- **Live indicator** — Pulsing dot in Claude's brand color when a Claude Code session is actively running; auto-increases refresh rate to 1 min
+- **Live indicator** — Pulsing dot when the selected AI CLI is actively running; auto-increases refresh rate to 1 min
 - **Dropdown menu** — Detailed breakdown with colored ASCII bars, reset times, and status
 - **Zero config** — Reads your Claude Code OAuth token from keychain automatically
 
 ## How It Works
+
+### Claude Code
 
 Makes a minimal API request (`max_tokens: 1`, Haiku model) to `api.anthropic.com` and reads the rate limit headers:
 
@@ -40,12 +43,16 @@ anthropic-ratelimit-unified-7d-reset: 1775862000
 
 Each check costs ~10 tokens (Haiku).
 
+### Codex
+
+Reads the latest local Codex session event from `~/.codex/sessions` and displays the `rate_limits` payload emitted by Codex. Codex checks are local-only and do not make an API request.
+
 ## Install
 
 ### Download (recommended)
 
-1. Download the latest `ClaudeMenuBar-v*.zip` from [Releases](https://github.com/Phirios/ClaudeMenuBar/releases)
-2. Unzip and move `ClaudeMenuBar.app` to `/Applications`
+1. Download the latest `AILimitCounter-v*.zip` from [Releases](https://github.com/Phirios/AILimitCounter/releases)
+2. Unzip and move `AILimitCounter.app` to `/Applications`
 3. Cache your Claude Code token (one-time):
 ```bash
 security find-generic-password -s "Claude Code-credentials" -w | \
@@ -59,22 +66,22 @@ security find-generic-password -s "Claude Code-credentials" -w | \
 ### Build from source
 
 ```bash
-git clone https://github.com/Phirios/ClaudeMenuBar.git
-cd ClaudeMenuBar
+git clone https://github.com/Phirios/AILimitCounter.git
+cd AILimitCounter
 swift build -c release
 ```
 
 Then create the app bundle:
 ```bash
-APP="$HOME/Applications/ClaudeMenuBar.app/Contents"
+APP="$HOME/Applications/AILimitCounter.app/Contents"
 mkdir -p "$APP/MacOS"
-cp .build/release/ClaudeMenuBar "$APP/MacOS/"
+cp .build/release/AILimitCounter "$APP/MacOS/"
 ```
 
 ### Launch at login (optional)
 
 ```bash
-osascript -e 'tell application "System Events" to make login item at end with properties {path:"/Applications/ClaudeMenuBar.app", hidden:false}'
+osascript -e 'tell application "System Events" to make login item at end with properties {path:"/Applications/AILimitCounter.app", hidden:false}'
 ```
 
 ## Menu Bar
@@ -126,7 +133,7 @@ cd linux
 cargo build --release
 ```
 
-Binary: `linux/target/release/claude-menubar`
+Binary: `linux/target/release/ai-limit-counter`
 
 ### Token setup (one-time)
 
@@ -142,11 +149,11 @@ Or copy from your Mac's `~/.claude/claude-menubar-token`.
 
 ```bash
 mkdir -p ~/.config/autostart
-cat > ~/.config/autostart/claude-menubar.desktop << 'EOF'
+cat > ~/.config/autostart/ai-limit-counter.desktop << 'EOF'
 [Desktop Entry]
 Type=Application
-Name=ClaudeMenuBar
-Exec=/path/to/claude-menubar
+Name=AILimitCounter
+Exec=/path/to/ai-limit-counter
 Comment=Claude Code rate limit monitor
 X-KDE-autostart-phase=2
 EOF

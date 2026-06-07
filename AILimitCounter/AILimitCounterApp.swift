@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct ClaudeMenuBarApp: App {
+struct AILimitCounterApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
@@ -18,7 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let usageMonitor = UsageMonitor()
 
     // Live session tracking
-    var isClaudeLive = false
+    var isProviderLive = false
     var processCheckTimer: Timer?
     var pulseTimer: Timer?
     var pulseAlpha: CGFloat = 1.0
@@ -26,6 +26,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Claude brand color (coral/terracotta)
     static let claudeColor = NSColor(red: 0.85, green: 0.47, blue: 0.34, alpha: 1.0)  // #D97757
+    static let codexColor = NSColor(red: 0.13, green: 0.48, blue: 0.93, alpha: 1.0)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -49,15 +50,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         usageMonitor.startMonitoring()
 
-        // Check for claude process every 3 seconds
+        // Check for active CLI process every 3 seconds
         processCheckTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            self?.checkClaudeProcess()
+            self?.checkProviderProcess()
         }
-        checkClaudeProcess()
+        checkProviderProcess()
 
         // Pulse animation timer (smooth ~15fps)
         pulseTimer = Timer.scheduledTimer(withTimeInterval: 0.07, repeats: true) { [weak self] _ in
-            guard let self = self, self.isClaudeLive else { return }
+            guard let self = self, self.isProviderLive else { return }
             self.pulseAlpha += self.pulseDirection * 0.04
             if self.pulseAlpha <= 0.3 {
                 self.pulseAlpha = 0.3
@@ -72,22 +73,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func checkClaudeProcess() {
+    private var providerColor: NSColor {
+        switch usageMonitor.selectedProvider {
+        case .claude: return Self.claudeColor
+        case .codex: return Self.codexColor
+        }
+    }
+
+    func checkProviderProcess() {
         let pipe = Pipe()
         let task = Process()
         task.launchPath = "/usr/bin/pgrep"
-        task.arguments = ["-f", "claude"]
+        task.arguments = ["-f", usageMonitor.selectedProvider.processPattern]
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
         try? task.run()
         task.waitUntilExit()
 
-        let wasLive = isClaudeLive
-        isClaudeLive = task.terminationStatus == 0
+        let wasLive = isProviderLive
+        isProviderLive = task.terminationStatus == 0
 
         // Adjust refresh interval when live status changes
-        if isClaudeLive != wasLive {
-            if isClaudeLive {
+        if isProviderLive != wasLive {
+            if isProviderLive {
                 usageMonitor.refreshInterval = 60  // every 1 min when live
             } else {
                 let saved = UserDefaults.standard.double(forKey: "refresh_interval")
@@ -106,20 +114,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
+        let providerItem = NSMenuItem(title: "Provider", action: nil, keyEquivalent: "")
+        let providerMenu = NSMenu()
+        for provider in AIProvider.allCases {
+            let item = NSMenuItem(
+                title: provider.displayName,
+                action: #selector(selectProvider(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = provider.rawValue
+            item.state = usageMonitor.selectedProvider == provider ? .on : .off
+            providerMenu.addItem(item)
+        }
+        providerItem.submenu = providerMenu
+        menu.addItem(providerItem)
+        menu.addItem(NSMenuItem.separator())
+
         // Live status
-        if isClaudeLive {
+        if isProviderLive {
             let liveItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             liveItem.isEnabled = false
             liveItem.attributedTitle = NSAttributedString(
-                string: "● Claude is running",
+                string: "● \(usageMonitor.selectedProvider.displayName) is running",
                 attributes: [
                     .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-                    .foregroundColor: Self.claudeColor
+                    .foregroundColor: providerColor
                 ]
             )
             menu.addItem(liveItem)
         } else {
-            menu.addItem(disabledItem("○ Claude is idle"))
+            menu.addItem(disabledItem("○ \(usageMonitor.selectedProvider.displayName) is idle"))
         }
 
         menu.addItem(NSMenuItem.separator())
@@ -129,24 +154,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(headerItem(statusText))
             menu.addItem(NSMenuItem.separator())
 
-            let active5 = usage.representativeClaim == "five_hour" ? " ◀" : ""
+            let active5 = usage.primary.isRepresentative ? " ◀" : ""
             menu.addItem(coloredMenuItem(
-                label: "5h  ", percent: usage.fiveHourPercent, suffix: active5
+                label: "\(usage.primary.label)  ", percent: usage.primary.percent, suffix: active5
             ))
-            menu.addItem(disabledItem("      Reset: \(relativeTime(usage.fiveHourReset))"))
+            menu.addItem(disabledItem("      Reset: \(relativeTime(usage.primary.reset))"))
 
             menu.addItem(NSMenuItem.separator())
 
-            let active7 = usage.representativeClaim == "seven_day" ? " ◀" : ""
+            let active7 = usage.secondary.isRepresentative ? " ◀" : ""
             menu.addItem(coloredMenuItem(
-                label: "7d  ", percent: usage.sevenDayPercent, suffix: active7
+                label: "\(usage.secondary.label)  ", percent: usage.secondary.percent, suffix: active7
             ))
-            menu.addItem(disabledItem("      Reset: \(relativeTime(usage.sevenDayReset))"))
+            menu.addItem(disabledItem("      Reset: \(relativeTime(usage.secondary.reset))"))
 
-            if usage.overagePercent > 0 {
+            if let overage = usage.overage, overage.percent > 0 {
                 menu.addItem(NSMenuItem.separator())
                 menu.addItem(coloredMenuItem(
-                    label: "Ovg ", percent: usage.overagePercent, suffix: ""
+                    label: "\(overage.label) ", percent: overage.percent, suffix: ""
                 ))
             }
 
@@ -155,6 +180,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let formatter = DateFormatter()
             formatter.dateFormat = "HH:mm:ss"
             menu.addItem(disabledItem("Updated: \(formatter.string(from: usage.fetchedAt))"))
+            menu.addItem(disabledItem("Source: \(usage.source)"))
 
         } else if let error = usageMonitor.error {
             menu.addItem(disabledItem("⚠️ \(error)"))
@@ -182,10 +208,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func updateButton(_ button: NSStatusBarButton) {
         if let usage = usageMonitor.currentUsage {
             button.image = drawFullStatusIcon(
-                sessionPercent: usage.fiveHourPercent,
-                weeklyPercent: usage.sevenDayPercent,
+                sessionPercent: usage.primary.percent,
+                weeklyPercent: usage.secondary.percent,
                 blocked: usage.status != "allowed",
-                resetDate: usage.fiveHourReset
+                resetDate: usage.primary.reset
             )
             button.title = ""
         } else {
@@ -220,7 +246,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let contentY = (barHeight - contentHeight) / 2  // vertically center the block
 
         // Live dot
-        let showDot = isClaudeLive
+        let showDot = isProviderLive
         let dotGap: CGFloat = 3
 
         // Total width
@@ -268,7 +294,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if showDot {
                 let dotX = circleSize + gap + pctSize.width + dotGap
                 let dotY = (barHeight - dotSize) / 2
-                Self.claudeColor.withAlphaComponent(self.pulseAlpha).setFill()
+                self.providerColor.withAlphaComponent(self.pulseAlpha).setFill()
                 NSBezierPath(ovalIn: NSRect(x: dotX, y: dotY, width: dotSize, height: dotSize)).fill()
             }
 
@@ -418,6 +444,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         usageMonitor.fetchUsage()
     }
 
+    @objc func selectProvider(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let provider = AIProvider(rawValue: rawValue) else { return }
+        usageMonitor.selectedProvider = provider
+        checkProviderProcess()
+    }
+
     @objc func openSettings() {
         if let w = settingsWindow, w.isVisible {
             w.makeKeyAndOrderFront(nil)
@@ -429,9 +462,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             rootView: SettingsView().environmentObject(usageMonitor)
         )
         let window = NSWindow(contentViewController: hostingController)
-        window.title = "Claude Menu Bar Settings"
+        window.title = "AI Limit Counter Settings"
         window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 420, height: 280))
+        window.setContentSize(NSSize(width: 420, height: 340))
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

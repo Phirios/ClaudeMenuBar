@@ -1,7 +1,54 @@
 import Foundation
 import Combine
+import Security
+
+enum AIProvider: String, CaseIterable, Identifiable {
+    case claude
+    case codex
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .claude: return "Claude Code"
+        case .codex: return "Codex"
+        }
+    }
+
+    var processPattern: String {
+        switch self {
+        case .claude: return "claude"
+        case .codex: return "codex"
+        }
+    }
+
+    var tokenLabel: String {
+        switch self {
+        case .claude: return "Claude Code keychain token"
+        case .codex: return "Codex session logs"
+        }
+    }
+}
+
+private enum DefaultsKeys {
+    static let selectedProvider = "selected_provider"
+    static let legacyBundleIdentifier = "com.phirios.ClaudeMenuBar"
+}
+
+struct UsageWindow {
+    let label: String
+    let utilization: Double
+    let reset: Date
+    let isRepresentative: Bool
+
+    var percent: Int { Int(utilization * 100) }
+}
 
 struct UsageData {
+    let provider: AIProvider
+    let primary: UsageWindow
+    let secondary: UsageWindow
+    let overage: UsageWindow?
     let fiveHourUtilization: Double
     let fiveHourReset: Date
     let sevenDayUtilization: Double
@@ -12,6 +59,7 @@ struct UsageData {
     let fallbackPercentage: Double
     let status: String
     let fetchedAt: Date
+    let source: String
 
     var fiveHourPercent: Int { Int(fiveHourUtilization * 100) }
     var sevenDayPercent: Int { Int(sevenDayUtilization * 100) }
@@ -22,9 +70,39 @@ class UsageMonitor: ObservableObject {
     @Published var currentUsage: UsageData?
     @Published var error: String?
     @Published var isLoading = false
+    @Published var selectedProvider: AIProvider {
+        didSet {
+            guard oldValue != selectedProvider else { return }
+            UserDefaults.standard.set(selectedProvider.rawValue, forKey: DefaultsKeys.selectedProvider)
+            UserDefaults.standard.synchronize()
+            currentUsage = nil
+            error = nil
+            startMonitoring()
+        }
+    }
 
     var onUpdate: (() -> Void)?
     private var timer: Timer?
+
+    init() {
+        let stored = Self.storedProviderRawValue()
+        selectedProvider = AIProvider(rawValue: stored ?? "") ?? .claude
+    }
+
+    private static func storedProviderRawValue() -> String? {
+        if let stored = UserDefaults.standard.string(forKey: DefaultsKeys.selectedProvider) {
+            return stored
+        }
+
+        let legacyDefaults = UserDefaults(suiteName: DefaultsKeys.legacyBundleIdentifier)
+        guard let legacyProvider = legacyDefaults?.string(forKey: DefaultsKeys.selectedProvider) else {
+            return nil
+        }
+
+        UserDefaults.standard.set(legacyProvider, forKey: DefaultsKeys.selectedProvider)
+        UserDefaults.standard.synchronize()
+        return legacyProvider
+    }
 
     var refreshInterval: TimeInterval {
         get {
@@ -46,6 +124,15 @@ class UsageMonitor: ObservableObject {
     }
 
     func fetchUsage() {
+        switch selectedProvider {
+        case .claude:
+            fetchClaudeUsage()
+        case .codex:
+            fetchCodexUsage()
+        }
+    }
+
+    private func fetchClaudeUsage() {
         guard let token = getToken() else {
             error = "Claude Code auth token not found"
             onUpdate?()
@@ -183,7 +270,30 @@ class UsageMonitor: ObservableObject {
         let claim = headerString(headers, "anthropic-ratelimit-unified-representative-claim") ?? ""
         let fallback = headerDouble(headers, "anthropic-ratelimit-unified-fallback-percentage") ?? 0
 
+        let primary = UsageWindow(
+            label: "5h",
+            utilization: fiveHUtil,
+            reset: fiveHReset,
+            isRepresentative: claim == "five_hour"
+        )
+        let secondary = UsageWindow(
+            label: "7d",
+            utilization: sevenDUtil,
+            reset: sevenDReset,
+            isRepresentative: claim == "seven_day"
+        )
+        let overage = overageUtil > 0 ? UsageWindow(
+            label: "Ovg",
+            utilization: overageUtil,
+            reset: overageReset,
+            isRepresentative: false
+        ) : nil
+
         currentUsage = UsageData(
+            provider: .claude,
+            primary: primary,
+            secondary: secondary,
+            overage: overage,
             fiveHourUtilization: fiveHUtil,
             fiveHourReset: fiveHReset,
             sevenDayUtilization: sevenDUtil,
@@ -193,9 +303,128 @@ class UsageMonitor: ObservableObject {
             representativeClaim: claim,
             fallbackPercentage: fallback,
             status: status,
-            fetchedAt: Date()
+            fetchedAt: Date(),
+            source: "Anthropic rate-limit headers"
         )
         onUpdate?()
+    }
+
+    private func fetchCodexUsage() {
+        isLoading = true
+        error = nil
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = self?.readLatestCodexRateLimits()
+            DispatchQueue.main.async {
+                self?.isLoading = false
+                switch result {
+                case .success(let usage):
+                    self?.currentUsage = usage
+                    self?.error = nil
+                case .failure(let message):
+                    self?.currentUsage = nil
+                    self?.error = message
+                case .none:
+                    self?.currentUsage = nil
+                    self?.error = "Codex usage unavailable"
+                }
+                self?.onUpdate?()
+            }
+        }
+    }
+
+    private enum CodexReadResult {
+        case success(UsageData)
+        case failure(String)
+    }
+
+    private func readLatestCodexRateLimits() -> CodexReadResult {
+        let sessionsURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/sessions")
+
+        guard let enumerator = FileManager.default.enumerator(
+            at: sessionsURL,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return .failure("Codex session directory not found")
+        }
+
+        var files: [(url: URL, modified: Date)] = []
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            files.append((url, modified))
+        }
+
+        for file in files.sorted(by: { $0.modified > $1.modified }) {
+            guard let text = try? String(contentsOf: file.url, encoding: .utf8) else { continue }
+            for line in text.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
+                guard let usage = parseCodexRateLimitLine(String(line), sourceURL: file.url) else { continue }
+                return .success(usage)
+            }
+        }
+
+        return .failure("No Codex rate-limit events found yet")
+    }
+
+    private func parseCodexRateLimitLine(_ line: String, sourceURL: URL) -> UsageData? {
+        guard let data = line.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = json["payload"] as? [String: Any],
+              let limits = payload["rate_limits"] as? [String: Any],
+              let primaryRaw = limits["primary"] as? [String: Any],
+              let secondaryRaw = limits["secondary"] as? [String: Any],
+              let primaryUsed = jsonDouble(primaryRaw["used_percent"]),
+              let primaryReset = jsonDouble(primaryRaw["resets_at"]),
+              let secondaryUsed = jsonDouble(secondaryRaw["used_percent"]),
+              let secondaryReset = jsonDouble(secondaryRaw["resets_at"]) else {
+            return nil
+        }
+
+        let reachedType = limits["rate_limit_reached_type"] as? String
+        let status = reachedType == nil ? "allowed" : "blocked"
+        let primary = UsageWindow(
+            label: "5h",
+            utilization: primaryUsed / 100,
+            reset: Date(timeIntervalSince1970: primaryReset),
+            isRepresentative: primaryUsed >= secondaryUsed
+        )
+        let secondary = UsageWindow(
+            label: "7d",
+            utilization: secondaryUsed / 100,
+            reset: Date(timeIntervalSince1970: secondaryReset),
+            isRepresentative: secondaryUsed > primaryUsed
+        )
+        let plan = limits["plan_type"] as? String
+        let source = plan == nil
+            ? "Latest Codex session log"
+            : "Latest Codex session log (\(plan!))"
+
+        return UsageData(
+            provider: .codex,
+            primary: primary,
+            secondary: secondary,
+            overage: nil,
+            fiveHourUtilization: primary.utilization,
+            fiveHourReset: primary.reset,
+            sevenDayUtilization: secondary.utilization,
+            sevenDayReset: secondary.reset,
+            overageUtilization: 0,
+            overageReset: Date(),
+            representativeClaim: primary.isRepresentative ? "five_hour" : "seven_day",
+            fallbackPercentage: 0,
+            status: status,
+            fetchedAt: Date(),
+            source: sourceURL.lastPathComponent + " - " + source
+        )
+    }
+
+    private func jsonDouble(_ value: Any?) -> Double? {
+        if let value = value as? Double { return value }
+        if let value = value as? Int { return Double(value) }
+        if let value = value as? NSNumber { return value.doubleValue }
+        if let value = value as? String { return Double(value) }
+        return nil
     }
 
     private func getToken() -> String? {

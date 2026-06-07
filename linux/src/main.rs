@@ -1,8 +1,9 @@
 use std::{
+    fs,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, Mutex,
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -125,8 +126,31 @@ fn render_icon(session_pct: i32, weekly_pct: i32, blocked: bool, pulse: f32) -> 
 
 // ── Usage data ───────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Provider {
+    Claude,
+    Codex,
+}
+
+impl Provider {
+    fn name(self) -> &'static str {
+        match self {
+            Provider::Claude => "Claude Code",
+            Provider::Codex => "Codex",
+        }
+    }
+
+    fn process_pattern(self) -> &'static str {
+        match self {
+            Provider::Claude => "claude",
+            Provider::Codex => "codex",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct UsageData {
+    provider: Provider,
     five_h_util: f32,
     five_h_reset: i64,
     seven_d_util: f32,
@@ -134,6 +158,7 @@ struct UsageData {
     overage_util: f32,
     claim: String,
     status: String,
+    source: String,
     fetched_at: i64,
 }
 
@@ -150,7 +175,7 @@ fn now_secs() -> i64 {
         .as_secs() as i64
 }
 
-fn get_token() -> Option<String> {
+fn get_claude_token() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     let path = PathBuf::from(home).join(".claude/claude-menubar-token");
     let t = std::fs::read_to_string(path).ok()?.trim().to_owned();
@@ -168,6 +193,7 @@ fn hdr_i64(resp: &ureq::Response, key: &str) -> Option<i64> {
 fn parse_headers(resp: &ureq::Response) -> Option<UsageData> {
     let now = now_secs();
     Some(UsageData {
+        provider: Provider::Claude,
         five_h_util: hdr_f32(resp, "anthropic-ratelimit-unified-5h-utilization")?,
         five_h_reset: hdr_i64(resp, "anthropic-ratelimit-unified-5h-reset").unwrap_or(now),
         seven_d_util: hdr_f32(resp, "anthropic-ratelimit-unified-7d-utilization")?,
@@ -181,11 +207,12 @@ fn parse_headers(resp: &ureq::Response) -> Option<UsageData> {
             .header("anthropic-ratelimit-unified-status")
             .unwrap_or("unknown")
             .into(),
+        source: "Anthropic rate-limit headers".into(),
         fetched_at: now,
     })
 }
 
-fn do_fetch(token: &str) -> Result<UsageData, String> {
+fn fetch_claude_usage(token: &str) -> Result<UsageData, String> {
     let body = serde_json::json!({
         "model": "claude-haiku-4-5-20251001",
         "max_tokens": 1,
@@ -210,6 +237,77 @@ fn do_fetch(token: &str) -> Result<UsageData, String> {
     parse_headers(&resp).ok_or_else(|| "Rate limit headers not found".into())
 }
 
+fn collect_jsonl_files(dir: PathBuf, out: &mut Vec<(PathBuf, SystemTime)>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl_files(path, out);
+        } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            out.push((path, modified));
+        }
+    }
+}
+
+fn parse_codex_line(line: &str, source: &str) -> Option<UsageData> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let limits = value.get("payload")?.get("rate_limits")?;
+    let primary = limits.get("primary")?;
+    let secondary = limits.get("secondary")?;
+    let primary_used = primary.get("used_percent")?.as_f64()? as f32;
+    let primary_reset = primary.get("resets_at")?.as_i64()?;
+    let secondary_used = secondary.get("used_percent")?.as_f64()? as f32;
+    let secondary_reset = secondary.get("resets_at")?.as_i64()?;
+    let reached_type = limits.get("rate_limit_reached_type").and_then(|v| v.as_str());
+    let plan = limits.get("plan_type").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+    Some(UsageData {
+        provider: Provider::Codex,
+        five_h_util: primary_used / 100.0,
+        five_h_reset: primary_reset,
+        seven_d_util: secondary_used / 100.0,
+        seven_d_reset: secondary_reset,
+        overage_util: 0.0,
+        claim: if primary_used >= secondary_used { "five_hour" } else { "seven_day" }.into(),
+        status: if reached_type.is_some() { "blocked" } else { "allowed" }.into(),
+        source: format!("{} - latest Codex session log ({})", source, plan),
+        fetched_at: now_secs(),
+    })
+}
+
+fn fetch_codex_usage() -> Result<UsageData, String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let mut files = Vec::new();
+    collect_jsonl_files(PathBuf::from(home).join(".codex/sessions"), &mut files);
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+
+    for (path, _) in files {
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let source = path.file_name().and_then(|s| s.to_str()).unwrap_or("session");
+        for line in text.lines().rev() {
+            if let Some(usage) = parse_codex_line(line, source) {
+                return Ok(usage);
+            }
+        }
+    }
+
+    Err("No Codex rate-limit events found yet".into())
+}
+
+fn fetch_usage(provider: Provider) -> Result<UsageData, String> {
+    match provider {
+        Provider::Claude => match get_claude_token() {
+            Some(t) => fetch_claude_usage(&t),
+            None => Err("Token not found. Run: claude auth login".into()),
+        },
+        Provider::Codex => fetch_codex_usage(),
+    }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn bar(pct: i32) -> String {
@@ -230,9 +328,9 @@ fn rel_time(ts: i64) -> String {
     }
 }
 
-fn is_claude_running() -> bool {
+fn is_provider_running(provider: Provider) -> bool {
     std::process::Command::new("pgrep")
-        .args(["-f", "claude"])
+        .args(["-f", provider.process_pattern()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -243,17 +341,19 @@ fn is_claude_running() -> bool {
 // ── Tray ─────────────────────────────────────────────────────────────────────
 
 struct ClaudeTray {
+    provider: Provider,
     usage: Option<UsageData>,
     error: Option<String>,
     is_live: bool,
     pulse: f32,
     pulse_dir: f32,
     refresh_tx: mpsc::SyncSender<()>,
+    provider_state: Arc<Mutex<Provider>>,
 }
 
 impl ksni::Tray for ClaudeTray {
     fn id(&self) -> String {
-        "claude-menubar".into()
+        "ai-limit-counter".into()
     }
 
     fn category(&self) -> ksni::Category {
@@ -263,7 +363,7 @@ impl ksni::Tray for ClaudeTray {
     fn title(&self) -> String {
         match &self.usage {
             Some(u) => format!("Claude {}%/{}%", u.five_h_pct(), u.seven_d_pct()),
-            None => "ClaudeMenuBar".into(),
+            None => format!("{} MenuBar", self.provider.name()),
         }
     }
 
@@ -294,10 +394,36 @@ impl ksni::Tray for ClaudeTray {
 
         let mut items: Vec<ksni::MenuItem<Self>> = vec![];
 
+        items.push(disabled("Provider".into()));
+        for provider in [Provider::Claude, Provider::Codex] {
+            let provider_state = Arc::clone(&self.provider_state);
+            items.push(
+                StandardItem {
+                    label: format!(
+                        "{} {}",
+                        if self.provider == provider { "✓" } else { " " },
+                        provider.name()
+                    ),
+                    activate: Box::new(move |this: &mut Self| {
+                        this.provider = provider;
+                        this.usage = None;
+                        this.error = None;
+                        if let Ok(mut selected) = provider_state.lock() {
+                            *selected = provider;
+                        }
+                        let _ = this.refresh_tx.try_send(());
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        items.push(ksni::MenuItem::Separator);
+
         items.push(disabled(if self.is_live {
-            "● Claude is running".into()
+            format!("● {} is running", self.provider.name())
         } else {
-            "○ Claude is idle".into()
+            format!("○ {} is idle", self.provider.name())
         }));
         items.push(ksni::MenuItem::Separator);
 
@@ -345,6 +471,7 @@ impl ksni::Tray for ClaudeTray {
                 } else {
                     format!("Updated: {}m ago", ago / 60)
                 }));
+                items.push(disabled(format!("Source: {}", u.source)));
             }
             None => {
                 items.push(disabled(match &self.error {
@@ -381,13 +508,11 @@ impl ksni::Tray for ClaudeTray {
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
-fn fetch_and_update(handle: &ksni::Handle<ClaudeTray>) {
-    let result = match get_token() {
-        Some(t) => do_fetch(&t),
-        None => Err("Token not found. Run: claude auth login".into()),
-    };
+fn fetch_and_update(handle: &ksni::Handle<ClaudeTray>, provider: Provider) {
+    let result = fetch_usage(provider);
     handle.update(move |t| match result {
         Ok(u) => {
+            t.provider = provider;
             t.usage = Some(u);
             t.error = None;
         }
@@ -399,14 +524,17 @@ fn fetch_and_update(handle: &ksni::Handle<ClaudeTray>) {
 
 fn main() {
     let (refresh_tx, refresh_rx) = mpsc::sync_channel::<()>(1);
+    let provider_state = Arc::new(Mutex::new(Provider::Claude));
 
     let service = ksni::TrayService::new(ClaudeTray {
+        provider: Provider::Claude,
         usage: None,
         error: None,
         is_live: false,
         pulse: 1.0,
         pulse_dir: -1.0,
         refresh_tx,
+        provider_state: Arc::clone(&provider_state),
     });
     let handle = service.handle();
     service.spawn();
@@ -416,17 +544,23 @@ fn main() {
     // Initial fetch
     {
         let h = handle.clone();
-        thread::spawn(move || fetch_and_update(&h));
+        let provider_state = Arc::clone(&provider_state);
+        thread::spawn(move || {
+            let provider = provider_state.lock().map(|p| *p).unwrap_or(Provider::Claude);
+            fetch_and_update(&h, provider);
+        });
     }
 
     // Refresh loop: fires on timer OR manual "Refresh Now"
     {
         let h = handle.clone();
         let live_flag = Arc::clone(&is_live_flag);
+        let provider_state = Arc::clone(&provider_state);
         thread::spawn(move || loop {
             let secs = if live_flag.load(Ordering::Relaxed) { 60 } else { 300 };
+            let provider = provider_state.lock().map(|p| *p).unwrap_or(Provider::Claude);
             match refresh_rx.recv_timeout(Duration::from_secs(secs)) {
-                Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => fetch_and_update(&h),
+                Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => fetch_and_update(&h, provider),
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         });
@@ -436,10 +570,13 @@ fn main() {
     {
         let h = handle.clone();
         let live_flag = Arc::clone(&is_live_flag);
+        let provider_state = Arc::clone(&provider_state);
         thread::spawn(move || loop {
-            let live = is_claude_running();
+            let provider = provider_state.lock().map(|p| *p).unwrap_or(Provider::Claude);
+            let live = is_provider_running(provider);
             live_flag.store(live, Ordering::Relaxed);
             h.update(move |t| {
+                t.provider = provider;
                 if !live && t.is_live {
                     t.pulse = 1.0;
                 }
